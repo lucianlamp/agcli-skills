@@ -44,7 +44,18 @@ agcli send "your prompt" -f /path/to/project --timeout 600000
 
 # Show thinking tokens (debug)
 agcli send "your prompt" -f /path/to/project --show-thinking
+
+# Machine-readable JSONL event stream
+agcli send "your prompt" -f /path/to/project --event-stream
+
+# Event stream with panel HTML snapshots
+agcli send "your prompt" -f /path/to/project --event-stream --panel-stream
 ```
+
+**Flag restrictions:**
+- `--json` and `--event-stream` cannot be combined
+- `--async` and `--event-stream` cannot be combined
+- `--panel-stream` requires `--event-stream`
 
 **Note**: `agcli send` defaults to Planning mode with the latest Opus Thinking model.
 
@@ -58,11 +69,13 @@ agcli resume 2 -f /path/to/project         # Open Nth chat
 agcli stop -f /path/to/project --json      # Stop active generation
 ```
 
+**Note**: `new`, `continue`, and `resume` do NOT support `--json`. Check exit code (0 = success, 1 = error) and stderr for error detection.
+
 ### Instance Management
 
 ```bash
 agcli status -f /path/to/project --json    # Check connection status
-agcli open -f /path/to/project             # Launch (auto-starts if needed)
+agcli open -f /path/to/project --json      # Launch (auto-starts if needed)
 agcli instances --json                     # List all running instances
 agcli close -f /path/to/project --json     # Close instance
 ```
@@ -74,8 +87,10 @@ agcli model -f /path/to/project                           # Get current model
 agcli model "claude-sonnet-4-5-20250514" -f /path/to/project  # Set model
 agcli model --list -f /path/to/project                     # List available models
 agcli mode -f /path/to/project                             # Get current mode
-agcli mode "Ask" -f /path/to/project                       # Set mode (Agent, Ask, Edit)
+agcli mode "Planning" -f /path/to/project                  # Set mode
 ```
+
+**Note**: `model` and `mode` do NOT support `--json`. Use `agcli mode --list` to see actual available mode names (they vary by Antigravity version).
 
 ### Job Management (Async)
 
@@ -94,6 +109,256 @@ agcli clear-pending -f /path/to/project --json   # Discard pending messages
 agcli sync-pending -f /path/to/project --json    # Sync job state with AG queue
 ```
 
+### Agent Bridge (JSONL Protocol)
+
+```bash
+agcli agent-bridge -f /path/to/project
+```
+
+Starts a stdin/stdout JSONL bridge for programmatic control. Send one JSON object per line:
+
+```json
+{"op": "send", "prompt": "Fix the login bug", "folder": "/project"}
+{"op": "status", "folder": "/project"}
+{"op": "stop", "folder": "/project"}
+{"op": "exit"}
+```
+
+Supported ops: `new`, `send`, `status`, `instances`, `open`, `stop`, `send-all`, `clear-pending`, `sync-pending`, `close`, `jobs`, `mode`, `model`, `continue`, `resume`, `exit`.
+
+### Setup Commands
+
+```bash
+agcli install-skill     # Install agcli skill to ~/.claude/commands/
+agcli install-mcp       # Configure agcli MCP server for Gemini CLI
+```
+
+## JSON Output Format
+
+All `--json` outputs follow `{ ok: boolean, ... }` convention. Errors always include `{ ok: false, error: "message" }`.
+
+### `send --json` — Success
+
+```json
+{
+  "ok": true,
+  "status": "succeeded",
+  "streamingMode": "disabled_for_json",
+  "folder": "/path/to/project",
+  "port": 9000,
+  "prompt": "Add rate limiting",
+  "autoLaunched": false,
+  "waited": true,
+  "queuedInAg": false,
+  "response": "I've added rate limiting to...",
+  "responseDetails": {
+    "changeOverview": ["src/auth.ts modified"],
+    "artifactCards": [],
+    "footerActions": []
+  },
+  "chatStatus": {
+    "isGenerating": false,
+    "hasInput": false,
+    "messageCount": 6,
+    "pendingMessageCount": 0,
+    "hasPendingMessages": false,
+    "hasSendAllButton": false
+  },
+  "taskReport": null,
+  "resultSummary": "Added rate limiting middleware",
+  "filesRead": ["src/auth.ts", "src/middleware.ts"],
+  "filesModified": ["src/auth.ts"],
+  "artifactFiles": [],
+  "actions": ["Edited src/auth.ts"],
+  "errors": [],
+  "changeOverview": ["src/auth.ts modified"],
+  "artifactCards": [],
+  "artifactRefs": [],
+  "artifactBody": null,
+  "artifactBodySource": null,
+  "footerActions": [],
+  "pendingMessageCount": 0,
+  "hasSendAllButton": false
+}
+```
+
+**Key fields for agents:**
+- `status` — `"succeeded"` or `"queued_in_ag"` (see below)
+- `queuedInAg` — `true` means the prompt was queued, NOT executed yet
+- `response` — the AI's response text (`undefined` when `queuedInAg`)
+- `filesModified` — files changed by the AI
+- `errors` — any errors encountered during execution
+
+### `send --json` — Queued in AG (IMPORTANT)
+
+When Antigravity is already generating a response, the prompt gets queued instead of executed:
+
+```json
+{
+  "ok": true,
+  "status": "queued_in_ag",
+  "queuedInAg": true,
+  "response": undefined,
+  "pendingMessageCount": 1,
+  "hasSendAllButton": true,
+  "filesModified": [],
+  "errors": []
+}
+```
+
+**How to handle `queued_in_ag`:**
+1. Wait for the current generation to finish: `agcli status -f /path --json` (check `chat.isGenerating`)
+2. Dispatch queued messages: `agcli send-all -f /path --json`
+3. Or sync job state: `agcli sync-pending -f /path --json`
+
+### `send --async --json`
+
+```json
+{
+  "ok": true,
+  "async": true,
+  "streamingMode": "disabled_for_async",
+  "jobId": "uuid-string",
+  "status": "queued",
+  "folder": "/path/to/project",
+  "port": 9000,
+  "timeoutMs": 1800000
+}
+```
+
+### `status --json`
+
+```json
+{
+  "ok": true,
+  "connected": true,
+  "targetId": "target-abc123",
+  "targetTitle": "my-app — Antigravity",
+  "folder": "/path/to/project",
+  "port": 9000,
+  "chat": {
+    "isGenerating": false,
+    "hasInput": false,
+    "messageCount": 5,
+    "pendingMessageCount": 0,
+    "hasPendingMessages": false,
+    "hasSendAllButton": false
+  }
+}
+```
+
+Not connected: `{ "ok": false, "connected": false, "error": "..." }`
+
+### `stop --json`
+
+```json
+{
+  "ok": true,
+  "folder": "/path/to/project",
+  "port": 9000,
+  "stopped": true,
+  "method": "cancel_button"
+}
+```
+
+`method` values: `"cancel_button"`, `"not_generating"`.
+`stopped: false` means the cancel button was not found.
+
+### `open --json`
+
+```json
+{ "ok": true, "folder": "/path", "port": 9000, "alreadyRunning": true }
+{ "ok": true, "folder": "/path", "port": 9000, "alreadyRunning": false }
+```
+
+### `close --json`
+
+```json
+{ "ok": true, "alreadyClosed": true, "folder": "/path", "port": 9000 }
+{ "ok": true, "alreadyClosed": false, "folder": "/path", "port": 9000, "closed": true }
+```
+
+### `instances --json`
+
+```json
+{
+  "ok": true,
+  "instances": [
+    { "id": "target-1", "port": 9000, "title": "Antigravity — ProjectA", "workspace": "Antigravity", "url": "...", "wsUrl": "...", "score": 150 }
+  ]
+}
+```
+
+### `jobs --json` (list)
+
+```json
+{ "ok": true, "jobs": [ { "id": "uuid", "status": "succeeded", "prompt": "...", "folder": "...", "createdAt": "...", ... } ] }
+```
+
+### `jobs <id> --json` (detail)
+
+```json
+{ "ok": true, "job": { "id": "uuid", "status": "succeeded", "response": "...", "filesModified": [...], ... } }
+```
+
+**AsyncJobStatus values:** `queued`, `running`, `queued_in_ag`, `dispatched_in_ag`, `orphaned_in_ag`, `cancelled`, `succeeded`, `failed`, `timed_out`
+
+**Active statuses** (still running): `queued`, `running`, `queued_in_ag`, `dispatched_in_ag`
+**Terminal statuses** (finished): `succeeded`, `failed`, `timed_out`, `cancelled`, `orphaned_in_ag`
+
+### `jobs --prune --json`
+
+```json
+{ "ok": true, "pruned": 3, "dryRun": false, "jobs": [...] }
+```
+
+### `send-all --json`
+
+```json
+{
+  "ok": true,
+  "folder": "/path",
+  "port": 9000,
+  "method": "send_all_button",
+  "acted": true,
+  "beforePendingCount": 2,
+  "afterPendingCount": 0,
+  "affectedJobIds": ["uuid-1", "uuid-2"]
+}
+```
+
+### `clear-pending --json`
+
+Same structure as `send-all --json` but with `method: "discard"`.
+
+### `sync-pending --json`
+
+```json
+{
+  "ok": true,
+  "folder": "/path",
+  "port": 9000,
+  "pendingPrompts": ["Fix the bug", "Add tests"],
+  "pendingMessageCount": 2,
+  "hasSendAllButton": true,
+  "confirmedCount": 1,
+  "orphanedCount": 0,
+  "confirmedJobIds": ["uuid-1"],
+  "orphanedJobIds": []
+}
+```
+
+## Exit Codes (`send` command)
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Connection failure (WebSocket/ECONNREFUSED) |
+| 2 | Timeout |
+| 3 | Send/prompt error |
+
+Other commands use exit code 1 for all errors.
+
 ## Workflow Patterns
 
 ### Pattern 1: Single Task Delegation
@@ -111,7 +376,7 @@ agcli send "Add rate limiting to the login function in src/auth.ts" \
 # Fire and forget
 agcli send "Increase test coverage to 80%+" \
   -f /target/project --async --json
-# → {"jobId": "abc123", ...}
+# → {"ok": true, "async": true, "jobId": "abc123", ...}
 
 # ... do other work ...
 
@@ -149,48 +414,20 @@ agcli sync-pending -f /target/project --json
 agcli clear-pending -f /target/project --json  # if sync doesn't resolve it
 ```
 
-## JSON Output Format
+### Pattern 6: Handle queued_in_ag
 
-All `--json` outputs follow `{ ok: boolean, ... }` convention.
+```bash
+# Send returns queued_in_ag — AG was busy
+result=$(agcli send "Fix bug" -f /project --json)
+status=$(echo "$result" | jq -r '.status')
 
-**send success:**
-```json
-{
-  "ok": true,
-  "response": "Response text...",
-  "responseDetails": {
-    "changeOverview": ["file.ts modified"],
-    "artifactCards": [],
-    "footerActions": []
-  },
-  "filesModified": ["src/auth.ts"],
-  "pendingMessageCount": 0
-}
-```
-
-**async send:**
-```json
-{
-  "ok": true,
-  "async": true,
-  "jobId": "uuid",
-  "status": "queued",
-  "folder": "/path/to/project"
-}
-```
-
-**status:**
-```json
-{
-  "ok": true,
-  "connected": true,
-  "targetTitle": "my-app — Antigravity",
-  "chat": {
-    "isGenerating": false,
-    "messageCount": 5,
-    "pendingMessageCount": 0
-  }
-}
+if [ "$status" = "queued_in_ag" ]; then
+  # Wait for generation to finish, then dispatch
+  while agcli status -f /project --json | jq -e '.chat.isGenerating'; do
+    sleep 5
+  done
+  agcli send-all -f /project --json
+fi
 ```
 
 ## Decision Guidelines
@@ -203,6 +440,8 @@ All `--json` outputs follow `{ ok: boolean, ... }` convention.
 | Unknown Antigravity state | `agcli status --json` first |
 | Continue previous conversation | `agcli continue` (new chat: `agcli new`) |
 | Response not coming back | `agcli stop` then `agcli status` |
+| `status: "queued_in_ag"` returned | `agcli send-all` after generation finishes |
+| Need structured real-time events | `agcli send --event-stream` |
 
 ## Environment Variables
 
@@ -221,3 +460,6 @@ All `--json` outputs follow `{ ok: boolean, ... }` convention.
 - Avoid concurrent `send` to the same folder (chat input contention)
 - Async jobs persist in `~/.agcli/jobs/`; run `--prune` periodically
 - `send` and `open` auto-launch Antigravity if not running (`--no-auto-launch` to disable)
+- Use `-v` / `--verbose` for debug logging (sets log level to debug)
+- `model` and `mode` commands output plain text only (no `--json` support)
+- Always check the `status` field in `send --json` output — `"queued_in_ag"` means NOT executed
