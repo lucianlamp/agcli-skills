@@ -50,12 +50,19 @@ agcli send "your prompt" -f /path/to/project --event-stream
 
 # Event stream with panel HTML snapshots
 agcli send "your prompt" -f /path/to/project --event-stream --panel-stream
+
+# Auto-continue: automatically send continuation prompts (default: 3 retries)
+agcli send "your prompt" -f /path/to/project --auto-continue
+agcli send "your prompt" -f /path/to/project --auto-continue 5 --json
 ```
 
 **Flag restrictions:**
 - `--json` and `--event-stream` cannot be combined
 - `--async` and `--event-stream` cannot be combined
+- `--auto-continue` and `--async` cannot be combined
 - `--panel-stream` requires `--event-stream`
+
+**Idle-wait behavior**: `send` automatically waits for Antigravity to finish any ongoing generation before sending the prompt. No manual polling is needed.
 
 **Note**: `agcli send` defaults to Planning mode with the latest Opus Thinking model.
 
@@ -183,11 +190,60 @@ All `--json` outputs follow `{ ok: boolean, ... }` convention. Errors always inc
 ```
 
 **Key fields for agents:**
+- `ok` — `true` if response is usable, `false` if AG returned an error (rate limit, server error, etc.)
+- `errorKind` — present only when `ok: false`. Values: `"rate_limit"`, `"server_error"`, `"generation_error"`
 - `status` — `"succeeded"` or `"queued_in_ag"` (see below)
 - `queuedInAg` — `true` means the prompt was queued, NOT executed yet
 - `response` — the AI's response text (`undefined` when `queuedInAg`)
 - `filesModified` — files changed by the AI
 - `errors` — any errors encountered during execution
+- `continuationCount` — present only when `--auto-continue` was used and at least one continuation was sent
+
+### `send --json` — AG Error Detected
+
+When Antigravity returns a rate-limit, server error, or generation error instead of a real response, `ok` is `false` and `errorKind` indicates the type:
+
+```json
+{
+  "ok": false,
+  "errorKind": "rate_limit",
+  "status": "succeeded",
+  "response": "Our servers are experiencing high traffic right now, please try again in a minute.",
+  "filesModified": [],
+  "errors": []
+}
+```
+
+**How to handle `ok: false`:**
+- `rate_limit` — wait and retry after a delay
+- `server_error` — retry, or escalate if persistent
+- `generation_error` — rephrase or simplify the prompt
+
+### `send --json` — With Auto-Continue
+
+When `--auto-continue` is used, the response is the concatenation of all segments, and `continuationCount` shows how many continuation prompts were sent:
+
+```json
+{
+  "ok": true,
+  "status": "succeeded",
+  "response": "First part of the response...\nContinuation 1...\nContinuation 2...",
+  "continuationCount": 2,
+  "filesModified": ["src/auth.ts"]
+}
+```
+
+If a continuation triggers an AG error, the partial concatenation is returned with `ok: false`:
+
+```json
+{
+  "ok": false,
+  "errorKind": "rate_limit",
+  "status": "succeeded",
+  "response": "First part...\nRate limit exceeded",
+  "continuationCount": 2
+}
+```
 
 ### `send --json` — Queued in AG (IMPORTANT)
 
@@ -400,7 +456,23 @@ agcli send "Update type definitions" -f /project-b --async --json
 agcli jobs --active --json
 ```
 
-### Pattern 5: Error Recovery
+### Pattern 5: Long Response with Auto-Continue
+
+For tasks that produce long responses (code generation, analysis), use `--auto-continue` to automatically send "続けて" when AG stops mid-response:
+
+```bash
+# Default: up to 3 continuations
+agcli send "Generate a comprehensive test suite for src/auth.ts" \
+  -f /target/project --auto-continue --json
+
+# More continuations for very long output
+agcli send "Analyze all security vulnerabilities in this project" \
+  -f /target/project --auto-continue 8 --json
+```
+
+Timeout applies **per segment**, not to the total. Each continuation resets the timer.
+
+### Pattern 6: Error Recovery
 
 ```bash
 # Reconnect if disconnected
@@ -414,7 +486,7 @@ agcli sync-pending -f /target/project --json
 agcli clear-pending -f /target/project --json  # if sync doesn't resolve it
 ```
 
-### Pattern 6: Handle queued_in_ag
+### Pattern 7: Handle queued_in_ag
 
 ```bash
 # Send returns queued_in_ag — AG was busy
@@ -442,6 +514,9 @@ fi
 | Response not coming back | `agcli stop` then `agcli status` |
 | `status: "queued_in_ag"` returned | `agcli send-all` after generation finishes |
 | Need structured real-time events | `agcli send --event-stream` |
+| Task likely to produce long output | `agcli send --auto-continue` |
+| `ok: false` with `errorKind: "rate_limit"` | Wait and retry after a delay |
+| `ok: false` with `errorKind: "server_error"` | Retry, escalate if persistent |
 
 ## Environment Variables
 
@@ -457,9 +532,12 @@ fi
 
 - Always specify `-f` / `--folder` to target the correct instance
 - Default send timeout is 30 minutes (1800000ms); use `--timeout` for longer tasks
+- `--timeout` applies **per segment** when using `--auto-continue` — each continuation resets the timer
+- `send` automatically waits for AG to finish generating before sending (no manual idle-polling needed)
 - Avoid concurrent `send` to the same folder (chat input contention)
 - Async jobs persist in `~/.agcli/jobs/`; run `--prune` periodically
 - `send` and `open` auto-launch Antigravity if not running (`--no-auto-launch` to disable)
 - Use `-v` / `--verbose` for debug logging (sets log level to debug)
 - `model` and `mode` commands output plain text only (no `--json` support)
+- Always check `ok` in `send --json` output — `false` means AG returned an error (check `errorKind`)
 - Always check the `status` field in `send --json` output — `"queued_in_ag"` means NOT executed
