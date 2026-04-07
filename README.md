@@ -31,7 +31,7 @@ npx skills add lucianlamp/agcli-skills -a claude
 
 ## Prerequisites
 
-- `agcli` installed and available in PATH (`npm install -g @lucianlamp/agcli`)
+- `agcli` installed and available in PATH (`npm install -g github:lucianlamp/agcli` — private repo, collaborator access required)
 - Antigravity IDE with CDP enabled (default port: 9000)
 
 ## License

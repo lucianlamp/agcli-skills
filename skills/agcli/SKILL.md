@@ -18,7 +18,7 @@ Control Antigravity IDE headlessly via the `agcli` CLI. Send prompts, manage cha
 
 ## Prerequisites
 
-- `agcli` installed (`npm install -g @lucianlamp/agcli` or available in PATH)
+- `agcli` installed (`npm install -g github:lucianlamp/agcli` — private repo, collaborator access required) or available in PATH
 - Antigravity with CDP enabled (default port: 9000)
 - Use `--json` flag for machine-readable output in automation
 
